@@ -1,0 +1,41 @@
+name: Generate Horse List from Text
+
+# list.txt が追加・更新されたときに自動起動
+on:
+  push:
+    paths:
+      - 'list.txt'
+
+jobs:
+  run-list-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. リポジトリのコードを取得
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Python環境のセットアップ
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 3. 必要なライブラリのインストール
+      - name: Install Dependencies
+        run: |
+          pip install requests beautifulsoup4 certifi
+
+      # 4. list.txt を引数にしてスクリプトを実行
+      - name: Run List Processing Script
+        run: |
+          python generate_from_list.py list.txt
+
+      # 5. 生成された result_list.txt をGitに自動コミット＆Push
+      - name: Commit and Push Result
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add result_list.txt
+          git commit -m "Auto-generate horse text from list.txt" || exit 0
+          git push

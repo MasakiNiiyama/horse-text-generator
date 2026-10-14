@@ -1,0 +1,37 @@
+name: Generate Horse Text
+
+on:
+  push:
+    paths:
+      - 'images/**' # imagesフォルダ内にファイルが入ったら起動
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Processing
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }} # Google Vision APIキー（GitHub Secretsに登録）
+        run: |
+          python main.py
+
+      - name: Commit and Push Result
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add result.txt
+          git commit -m "Auto-generate horse text" || exit 0
+          git push

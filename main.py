@@ -22,65 +22,142 @@ from google.cloud import vision
 from google.cloud.vision_v1.services.image_annotator.transports.rest import ImageAnnotatorRestTransport
 
 # -------------------------------------------------------------------
-# 1. JBISから「母馬名」「性別」を取得する関数（同名馬対策・年次優先版）
+# JBISから情報（母馬名・性別・調教師）を取得する関数（産駒対応・確定版）
 # -------------------------------------------------------------------
 def fetch_jbis_info(horse_name):
-    """
-    JBIS-サーチから馬名で検索し、最新生年の馬から母馬名と性別を取得する
-    """
-    clean_name = re.sub(r'(の)?\d{2}$', '', horse_name)
-    encoded_name = urllib.parse.quote(clean_name)
-    url = f"https://www.jbis.or.jp/horse/result/?sid=horse&keyword={encoded_name}"
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
 
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code != 200:
-            return {"mother": "不明", "sex": "不明"}
+    # パターン判定: 「アンズチャン24」「アンズチャンの24」のように末尾に2桁数字がある場合
+    sanku_match = re.search(r'^(.*?)の?(\d{2})$', horse_name)
 
-        soup = BeautifulSoup(res.text, "html.parser")
+    if sanku_match:
+        mother_name = sanku_match.group(1).strip()
+        birth_year = f"20{sanku_match.group(2)}年" # 24 -> 2024年
         
-        sex = "不明"
-        mother = "不明"
+        # 母馬の検索URL
+        encoded_mother = urllib.parse.quote(mother_name)
+        search_url = f"https://www.jbis.or.jp/horse/result/?sid=horse&keyword={encoded_mother}"
 
-        # 1. 性別の抽出（「牝」「牡」「セ」を取得）
-        for div in soup.find_all("div"):
-            text = div.text.strip()
-            if text in ["牝", "牡", "セ"]:
-                sex = text
-                break
+        try:
+            res = requests.get(search_url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return {"mother": mother_name, "sex": "不明", "trainer": "不明", "url": search_url}
 
-        # 2. 母馬名の抽出（ヒットした全ブロックの中から「最新の世代」の母馬を取得）
-        # 同名馬（過去のウォークライ等）がある場合、最も生年が新しい馬ブロックの母馬を採用
-        blocks = soup.select("div.tbl-data-01")
-        target_block = blocks[0] if blocks else soup
+            soup = BeautifulSoup(res.text, "html.parser")
+            
+            # 母馬の繁殖牝馬ページ（/broodmare/info/ または詳細ページ）を探す
+            broodmare_link = soup.find("a", href=re.compile(r"^/horse/\d+/broodmare/info/"))
+            if not broodmare_link:
+                # 検索結果1件目の馬詳細へ
+                first_horse = soup.find("a", href=re.compile(r"^/horse/\d+/"))
+                if first_horse:
+                    mother_id_match = re.search(r'/horse/(\d+)/', first_horse["href"])
+                    if mother_id_match:
+                        target_url = f"https://www.jbis.or.jp/horse/{mother_id_match.group(1)}/broodmare/info/"
+                    else:
+                        target_url = search_url
+                else:
+                    target_url = search_url
+            else:
+                target_url = f"https://www.jbis.or.jp{broodmare_link['href']}"
 
-        horse_links = target_block.find_all("a", href=re.compile(r"^/horse/\d+/"))
-        candidates = []
-        for a in horse_links:
-            text = a.text.strip()
-            if text and text != clean_name and text not in ["血統", "競走", "詳細", "ホーム", "馬情報"] and not text.isdigit():
-                candidates.append(text)
+            # 繁殖牝馬ページを取得
+            res_bm = requests.get(target_url, headers=headers, timeout=10)
+            soup_bm = BeautifulSoup(res_bm.text, "html.parser")
+
+            sex = "不明"
+            trainer = "不明"
+            child_url = target_url
+
+            # 産駒一覧の中から指定の誕生年(例: 2024年)を探す
+            for tr in soup_bm.find_all("tr"):
+                tr_text = tr.text
+                if birth_year in tr_text:
+                    # 性別の判定
+                    if "牝" in tr_text:
+                        sex = "牝"
+                    elif "牡" in tr_text:
+                        sex = "牡"
+                    elif "セ" in tr_text:
+                        sex = "セ"
+
+                    # 産駒個体ページへのリンクを取得
+                    child_a = tr.find("a", href=re.compile(r"^/horse/\d+/"))
+                    if child_a:
+                        child_url = f"https://www.jbis.or.jp{child_a['href']}"
+                        # 産駒の個別ページへアクセスして調教師を取得
+                        res_child = requests.get(child_url, headers=headers, timeout=10)
+                        soup_child = BeautifulSoup(res_child.text, "html.parser")
+                        
+                        trainer_link = soup_child.find("a", href=re.compile(r"^/horse/trainer/"))
+                        if trainer_link:
+                            trainer = trainer_link.text.strip().replace(" ", "")
+                    break
+
+            return {"mother": mother_name, "sex": sex, "trainer": trainer, "url": child_url}
+
+        except Exception as e:
+            print(f"[JBIS Fetch Error (産駒)] {horse_name}: {e}")
+            return {"mother": mother_name, "sex": "不明", "trainer": "不明", "url": search_url}
+
+    # --- 通常の競走馬（名前が既に決まっている馬）の処理 ---
+    else:
+        encoded_name = urllib.parse.quote(horse_name)
+        url = f"https://www.jbis.or.jp/horse/result/?sid=horse&keyword={encoded_name}"
         
-        if len(candidates) >= 2:
-            raw_mother = candidates[1]
-        elif len(candidates) == 1:
-            raw_mother = candidates[0]
-        else:
-            raw_mother = "不明"
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return {"mother": "不明", "sex": "不明", "trainer": "不明", "url": url}
 
-        # 外国馬記号 (ARG), (USA), (JPN) 等の除去
-        mother = re.sub(r'\([A-Za-z]{3}\)$', '', raw_mother)
+            soup = BeautifulSoup(res.text, "html.parser")
+            
+            sex = "不明"
+            mother = "不明"
+            trainer = "不明"
 
-        return {"mother": mother, "sex": sex}
+            # 1. 性別の抽出
+            for div in soup.find_all("div"):
+                text = div.text.strip()
+                if text in ["牝", "牡", "セ"]:
+                    sex = text
+                    break
 
-    except Exception as e:
-        print(f"[JBIS Fetch Error] {horse_name}: {e}")
-        return {"mother": "不明", "sex": "不明"}
-                
+            # 2. 最新世代のブロックから「母馬名」と「調教師名」を取得
+            blocks = soup.select("div.tbl-data-01")
+            target_block = blocks[0] if blocks else soup
+
+            # 調教師名
+            trainer_link = target_block.find("a", href=re.compile(r"^/horse/trainer/"))
+            if trainer_link:
+                trainer = trainer_link.text.strip().replace(" ", "")
+
+            # 母馬名
+            horse_links = target_block.find_all("a", href=re.compile(r"^/horse/\d+/"))
+            candidates = []
+            for a in horse_links:
+                text = a.text.strip()
+                if text and text != horse_name and text not in ["血統", "競走", "詳細", "ホーム", "馬情報"] and not text.isdigit():
+                    candidates.append(text)
+            
+            if len(candidates) >= 2:
+                raw_mother = candidates[1]
+            elif len(candidates) == 1:
+                raw_mother = candidates[0]
+            else:
+                raw_mother = "不明"
+
+            mother = re.sub(r'\([A-Za-z]{3}\)$', '', raw_mother)
+
+            return {"mother": mother, "sex": sex, "trainer": trainer, "url": url}
+
+        except Exception as e:
+            print(f"[JBIS Fetch Error] {horse_name}: {e}")
+            return {"mother": "不明", "sex": "不明", "trainer": "不明", "url": url}
+        
+                        
 # -------------------------------------------------------------------
 # 2. 画像からOCR（Vision API / REST通信）で対象馬を抽出する関数
 # -------------------------------------------------------------------
